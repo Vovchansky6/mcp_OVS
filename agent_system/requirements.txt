@@ -1,0 +1,62 @@
+# MCP Business AI - Agent System Dependencies
+# Python 3.11+
+
+# Core Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Async HTTP Client
+httpx==0.25.2
+aiohttp==3.9.1
+
+# Database
+asyncpg==0.29.0
+sqlalchemy[asyncio]==2.0.23
+redis==5.0.1
+aioredis==2.0.1
+
+# Message Queue
+aio-pika==9.3.1
+celery==5.3.4
+
+# LLM Frameworks
+langchain==0.1.0
+langchain-openai==0.0.2
+langchain-community==0.0.10
+llama-index==0.9.7
+openai==1.6.1
+anthropic==0.8.1
+tiktoken==0.5.2
+
+# Structured Logging
+structlog==23.2.0
+
+# Resilience Patterns
+circuitbreaker==2.0.0
+tenacity==8.2.3
+
+# Observability
+opentelemetry-api==1.21.0
+opentelemetry-sdk==1.21.0
+opentelemetry-instrumentation==0.42b0
+opentelemetry-exporter-jaeger==1.21.0
+prometheus-client==0.19.0
+
+# Utilities
+python-dotenv==1.0.0
+pyyaml==6.0.1
+python-dateutil==2.8.2
+orjson==3.9.10
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+
+# Code Quality
+black==23.11.0
+isort==5.12.0
+flake8==6.1.0
+mypy==1.7.1
