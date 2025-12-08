@@ -1,328 +1,532 @@
-# MCP Business AI Transformation
 
-Enterprise-grade MCP (Model Context Protocol) server with multi-agent system for business AI transformation.
+Вот как я бы оформил **полный README.md** для репозитория `mcp-biz-master`.
+Я напишу сразу готовый текст, который ты можешь **просто вставить в `README.md` вместо старого** (или в новый файл, если не хочешь трогать текущий).
 
-## 🏗️ Architecture Overview
+---
 
+````markdown
+# MCP Business AI Transformation (Cloud.ru Hackathon)
+
+Репозиторий команды: мультиагентная система на Evolution + MCP-сервер + Go-бизнес-движок.
+
+Цель: показать **реальный бизнес-сценарий**, где AI-агент:
+- понимает запрос человека,
+- планирует, какие MCP-tools вызвать,
+- ходит в публичные API через MCP-сервер,
+- считает метрики и отдаёт **summary + рекомендации + риски**.
+
+Решение спроектировано так, чтобы его можно было:
+- запускать **локально** (для разработки/демо),
+- упаковать в **контейнер** и развернуть в **Cloud.ru Evolution AI Agents**.
+
+---
+
+## 1. Архитектура
+
+Высокоуровневая схема:
+
+```text
+Пользователь
+   │
+   ▼
+Evolution (LLM, Cloud.ru)
+   │  (JSON-план: какие tools вызвать)
+   ▼
+agent_system (Python, наш оркестратор)
+   │  (MCP JSON-RPC)
+   ▼
+mcp_server (Python MCP-сервер)
+   │  (HTTP REST)
+   ▼
+go-biz-engine (Go микросервис с бизнес-логикой)
+   │
+   ▼
+Публичные API (курсы валют и др.)
+````
+
+### Компоненты репозитория
+
+* **`mcp_server/`** — Python MCP-сервер (FastAPI)
+
+  * реализует MCP-методы через `/mcp`:
+
+    * `initialize`
+    * `tools/list`
+    * `tools/call`
+    * `resources/list`
+    * `resources/read`
+  * хранит метаданные tools, управляет `ToolRegistry`
+  * делегирует выполнение tools в Go-сервис `go-biz-engine`.
+
+* **`go-biz-engine/`** — Go-микросервис с бизнес-логикой
+
+  * HTTP API:
+
+    * `GET /health`
+    * `POST /execute-tool`
+  * роутит вызовы по `tool_name` и считает метрики выполнения.
+  * Реализовано: реальный **`financial_analyzer`**.
+
+* **`agent_system/`** — мультиагентная Python-система
+
+  * обёртка над **Evolution Foundation Models** (Cloud.ru)
+  * оркестратор `handle_user_query`:
+
+    * получает запрос пользователя,
+    * спрашивает у Evolution **план**, какие MCP-tools вызвать,
+    * по плану вызывает MCP `tools/call` (которые дальше идут в Go),
+    * снова обращается к Evolution за **summary + рекомендациями + рисками**,
+    * отдаёт итоговый A2A-ответ.
+
+* **`src/`, `public/`, `Dockerfile.frontend` и т.п.** — фронтенд (Next.js), дашборд и вспомогательные вещи (можно подключать позже для визуализации).
+
+* **`docker-compose.yml`** — оркестрация сервисов (mcp_server, БД, Redis, фронт и т.д.).
+
+* **`init-db.sql`** — начальное наполнение БД (описания tools, схемы параметров и т.п.).
+
+---
+
+## 2. Что уже реализовано и работает
+
+### 2.1. Go-сервис `go-biz-engine`
+
+**Эндпоинты:**
+
+* `GET /health` — здоровье сервиса.
+* `POST /execute-tool` — универсальный вызов любого бизнес-tools.
+
+**Запрос** (`POST /execute-tool`):
+
+```json
+{
+  "tool_name": "financial_analyzer",
+  "params": {
+    "base_currency": "USD",
+    "quote_currency": "EUR",
+    "days": 7,
+    "amount": 1000
+  },
+  "correlation_id": "uuid",
+  "user_id": "agent-or-user-id",
+  "request_ts": "2025-12-09T10:00:00Z",
+  "context": {
+    "source": "mcp-biz-server",
+    "agent_id": "..."
+  }
+}
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Agent Layer   │◄──►│   MCP Gateway    │◄──►│ Business APIs   │
-│  (Orchestrator) │    │  (Protocol Hub)  │    │  (External)     │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   LLM Fabric    │    │ State Manager    │    │ Monitoring Hub  │
-│ (Multi-Model)   │    │ (Redis+Postgres) │    │ (Observability) │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
+
+**Ответ**:
+
+```json
+{
+  "status": "success",
+  "data": {
+    "rate_avg": 1.07,
+    "rate_min": 1.05,
+    "rate_max": 1.10,
+    "volatility": 0.012,
+    "raw": [
+      { "date": "2025-12-01", "rate": 1.06 },
+      ...
+    ]
+  },
+  "error": null,
+  "metrics": {
+    "latency_ms": 123,
+    "engine_time_ms": 100
+  },
+  "engine_version": "go-biz-engine/0.1.0"
+}
 ```
 
-## 🚀 Features
+**Реализованный бизнес-tool: `financial_analyzer`**
 
-### Core MCP Server
-- **FastAPI-based** high-performance server
-- **MCP Protocol** compliant (2024-11-05 spec)
-- **Multi-provider LLM support** (Evolution Foundation Models, OpenAI, HuggingFace)
-- **Circuit breaker** pattern for external API resilience
-- **Rate limiting** with Redis-based sliding window
-- **JWT & API Key** authentication
-- **Prometheus metrics** and OpenTelemetry tracing
+Принимает параметры:
 
-### Multi-Agent System
-- **Specialized Agents**: Data Analyst, API Executor, Business Validator, Report Generator
-- **Agent Registry** for dynamic agent management
-- **Message Bus** for inter-agent communication
-- **Task Orchestration** with intelligent agent selection
-- **LangChain/LlamaIndex** integration for advanced AI capabilities
+* `base_currency` — базовая валюта (например `"USD"`);
+* `quote_currency` — котируемая валюта (например `"EUR"`);
+* `days` — период анализа в днях;
+* `amount` — (опц.) сумма, на которую можно пересчитать курс.
 
-### Enterprise Features
-- **Real-time Dashboard** with React + TypeScript
-- **Business Domain Support**: Finance, Healthcare, Retail, Manufacturing, Technology
-- **Observability Stack**: Prometheus, Grafana, Jaeger
-- **Docker Compose** for easy deployment
-- **Production-ready** with security best practices
+Ходит в публичный API курсов валют, забирает исторические курсы за период и считает:
 
-## 🛠️ Technology Stack
+* **`rate_avg`** — средний курс,
+* **`rate_min`** — минимум,
+* **`rate_max`** — максимум,
+* **`volatility`** — простая оценка волатильности.
 
-### Frontend
-- **Next.js 15** with App Router
-- **TypeScript 5** for type safety
-- **Tailwind CSS 4** with shadcn/ui components
-- **Real-time updates** with WebSocket support
+---
 
-### Backend
-- **Python 3.11** with FastAPI
-- **PostgreSQL** for persistent storage
-- **Redis** for caching and rate limiting
-- **AsyncIO** for high concurrency
+### 2.2. MCP-сервер `mcp_server`
 
-### AI/ML
-- **Evolution Foundation Models** (Cloud.ru)
-- **OpenAI API** compatibility
-- **LangChain** for agent orchestration
-- **LlamaIndex** for data indexing
+* Реализовано JSON-RPC API на `/mcp`:
 
-### DevOps
-- **Docker** containerization
-- **Prometheus** monitoring
-- **Grafana** dashboards
-- **Jaeger** distributed tracing
+  * `tools/list` — отдаёт список зарегистрированных tools:
 
-## 📦 Quick Start
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "result": {
+        "tools": [
+          {
+            "name": "financial_analyzer",
+            "description": "...",
+            "inputSchema": { ...JSON Schema... }
+          },
+          ...
+        ]
+      }
+    }
+    ```
+  * `tools/call` — вызывает ToolRegistry → Go-движок → возвращает result:
 
-### Prerequisites
-- Docker & Docker Compose
-- Node.js 18+ (for local development)
-- Python 3.11+ (for local development)
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "type": "json",
+            "json": { ...данные от Go... }
+          }
+        ],
+        "isError": false,
+        "toolName": "financial_analyzer",
+        "executionTime": 0.123
+      }
+    }
+    ```
 
-### Environment Configuration
-Create a `.env` file:
+* **`ToolRegistry.execute_tool`**:
+
+  * проверяет, что tool зарегистрирован и `ACTIVE`;
+  * собирает payload для `go-biz-engine` (`tool_name`, `params`, `correlation_id`, `user_id`, `context`);
+  * делает HTTP-запрос в Go: `POST /execute-tool`;
+  * по `status == "success"` кладёт `data` в `ToolExecution.result`;
+  * по ошибке — заполняет `ToolExecution.error`.
+
+* `init-db.sql` содержит описания tools (`financial_analyzer`, `api_connector`, `data_validator`, `report_generator` и др.) с JSON-схемами параметров.
+  Их можно либо **подтянуть в ToolRegistry при старте**, либо зарегистрировать через REST-эндоинты.
+
+---
+
+### 2.3. Agent System (`agent_system`)
+
+* Обёртка **`EvolutionProvider`** — работа с Evolution Foundation Models (Cloud.ru).
+* Модели:
+
+  * `Plan`, `ToolCall`, `ToolCallResult`, `A2AResponse` (в `agent_system/core/plan_models.py`).
+* Оркестратор `handle_user_query` (в `agent_system/agents/orchestrator.py`):
+
+  1. Делает MCP `tools/list` → получает список доступных tools и их JSON-схемы.
+  2. Собирает промпт к Evolution: “вот запрос пользователя + вот доступные tools → верни JSON-план”.
+  3. Evolution возвращает план: `overall_goal` + массив `tool_calls`.
+  4. По плану циклом вызывает MCP `tools/call` → Go-сервис.
+  5. Передаёт Evolution JSON со всеми результатами → получает `summary + recommendations + risks`.
+  6. Возвращает `A2AResponse`:
+
+     * исходный запрос;
+     * цель;
+     * список результатов по шагам;
+     * краткое summary;
+     * рекомендации;
+     * риски.
+
+---
+
+## 3. Что ещё нужно доделать
+
+### 3.1. Автоматическая регистрация tools
+
+Сейчас:
+
+* описания tools лежат в БД (`init-db.sql`),
+* `ToolRegistry` хранит tools **в памяти**.
+
+Нужно:
+
+* либо при старте MCP-сервера подтягивать tools из БД и регистрировать в `ToolRegistry`,
+* либо иметь простой скрипт (или make-таргет), который один раз шлёт `POST /api/v1/tools/register` для каждого наиболее важного tools (хотя бы `financial_analyzer`).
+
+Пример ручной регистрации `financial_analyzer`:
+
 ```bash
-# API Keys
-EVOLUTION_API_KEY=your_evolution_api_key
-OPENAI_API_KEY=your_openai_api_key
-HUGGINGFACE_API_KEY=your_huggingface_api_key
-
-# Security
-SECRET_KEY=your-super-secret-key-change-in-production
-
-# Database (optional, defaults work with Docker)
-DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/mcp_db
-REDIS_URL=redis://localhost:6379
+curl -X POST http://localhost:8000/api/v1/tools/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "financial_analyzer",
+    "description": "Финансовый анализатор: курсы валют, базовые метрики, волатильность.",
+    "category": "finance",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "base_currency": { "type": "string" },
+        "quote_currency": { "type": "string" },
+        "days": { "type": "integer" },
+        "amount": { "type": "number" }
+      },
+      "required": ["base_currency", "quote_currency", "days"]
+    },
+    "status": "active",
+    "tags": ["finance", "rates", "volatility"]
+  }'
 ```
 
-### Start the System
+---
+
+### 3.2. Контейнеризация для Cloud.ru (MCP + Evolution)
+
+Что нужно для **боевого сценария на Cloud.ru**:
+
+1. **Аккаунт и промокод**
+
+   * Уже сделано: регистрация на Cloud.ru и ввод промокода.
+   * Результат: есть возможность работать с **Evolution Foundation Models** и AI Agents.
+
+2. **Получить Evolution API Key**
+
+   * В личном кабинете Cloud.ru:
+
+     * создать проект / workspace для Evolution,
+     * сгенерировать **API-ключ** для Evolution (это потребуется нашему `agent_system` или MCP-серверу, если он напрямую ходит в Evolution),
+     * сохранить ключ как `EVOLUTION_API_KEY`.
+
+3. **Собрать Docker-образ MCP-сервера (с Go-движком внутри)**
+
+   * Сейчас:
+
+     * `mcp_server` и `go-biz-engine` — отдельные сервисы (локально Docker Compose может поднять их отдельно).
+   * Для Cloud.ru Evolution Agent нам нужен **один образ**, который:
+
+     * поднимает `go-biz-engine` (например, отдельным процессом в entrypoint),
+     * поднимает `mcp_server` (FastAPI/uvicorn),
+     * слушает публичный порт MCP (обычно 8000 или другой),
+     * внутри использует `GO_BIZ_ENGINE_URL=http://localhost:8080`.
+
+   Пример концепции (упростить и собрать потом нормально):
+
+   * Базовый образ: `python:3.11-slim`.
+   * Устанавливаем Go или заранее собираем бинарник `go-biz-engine` и копируем в образ.
+   * Стартовый скрипт:
+
+     ```bash
+     #!/bin/sh
+     ./go-biz-engine-binary &
+     uvicorn app.main:app --host 0.0.0.0 --port 8000
+     ```
+
+   Это **TODO**: сейчас MCP и Go запускаются раздельно; для Cloud надо их объединить в один Docker.
+
+4. **Залить образ в реестр Cloud.ru**
+
+   * В Cloud.ru:
+
+     * создать Container Registry (если ещё нет),
+     * залогиниться в него через `docker login`,
+     * выполнить:
+
+       ```bash
+       docker build -t cr.cloud.ru/<project>/<repo>/mcp-biz-engine:latest .
+       docker push cr.cloud.ru/<project>/<repo>/mcp-biz-engine:latest
+       ```
+   * Важно: указать правильный адрес реестра и namespace из консоли Cloud.ru.
+
+5. **Создать MCP-based Agent в Cloud.ru Evolution AI Agents**
+
+   * В интерфейсе платформы Evolution:
+
+     * создать новый **AI Agent**,
+     * выбрать тип **MCP Agent** (или аналогичный пункт),
+     * в качестве backend указать:
+
+       * Наш образ из реестра `cr.cloud.ru/.../mcp-biz-engine:latest`,
+       * Порт контейнера, где слушает MCP (`/mcp` на 8000),
+       * Переменные окружения:
+
+         * `EVOLUTION_API_KEY` — ключ от Evolution,
+         * `GO_BIZ_ENGINE_URL=http://localhost:8080`,
+         * `DATABASE_URL`, `REDIS_URL` — при необходимости (если нужны БД/кэш),
+         * `DEBUG=false`.
+
+   * После запуска:
+
+     * MCP-сервер внутри контейнера будет доступен Evolution как MCP endpoint;
+     * инструменты, зарегистрированные в `ToolRegistry`, станут видны модели как MCP-tools.
+
+6. **Файл `tools.json`**
+
+   * Для того чтобы агент легко включался в каталог Evolution AI Agents, желательно иметь **описание shared-tools** в виде `tools.json` в корне репозитория.
+   * В нём можно описать:
+
+     * список MCP-tools, которые наш сервер поддерживает;
+     * их описания;
+     * типы аргументов.
+   * Это **ещё один TODO**, но его легко собрать на основе того, что уже есть в БД и в `tools/list`.
+
+---
+
+### 3.3. Улучшения по бизнес-функционалу
+
+Сейчас:
+
+* Реальный бизнес-tool: **`financial_analyzer`** (Go + публичный API курсов).
+* Остальные tools (`api_connector`, `data_validator`, `report_generator`) — в основном заглушки/скелеты.
+
+План по доработке:
+
+1. **`api_connector`**
+
+   * научить подключаться к произвольному REST API (URL + headers + query),
+   * возвращать нормализованный JSON.
+
+2. **`data_validator`**
+
+   * принимать JSON-данные,
+   * валидировать по заданным правилам (например, обязательные поля, типы, диапазоны),
+   * возвращать список ошибок/варнингов.
+
+3. **`report_generator`**
+
+   * принимать результаты других tools,
+   * собирать сводный отчёт (например, по валютным рискам),
+   * генерировать summary в текстовом виде плюс структурированные данные.
+
+---
+
+## 4. Как запускать локально (для команды)
+
+### 4.1. Быстрый старт (без Docker)
+
+#### Go-сервис
+
 ```bash
-# Start all services
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Stop services
-docker-compose down
+cd go-biz-engine
+go mod tidy
+go run ./cmd/go-biz-engine
+# слушает http://localhost:8080
 ```
 
-### Access Points
-- **Frontend Dashboard**: http://localhost:3000
-- **MCP Server API**: http://localhost:8000
-- **API Documentation**: http://localhost:8000/docs
-- **Grafana Dashboard**: http://localhost:3001 (admin/admin)
-- **Prometheus**: http://localhost:9091
-- **Jaeger Tracing**: http://localhost:16686
+#### MCP-сервер
 
-## 🔧 Development
-
-### Local Development Setup
-
-#### Backend (MCP Server)
 ```bash
 cd mcp_server
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate    # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+
+# В .env или окружении:
+# GO_BIZ_ENGINE_URL=http://localhost:8080
+
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# MCP endpoint: http://localhost:8000/mcp
 ```
 
-#### Agent System
-```bash
-cd agent_system
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python main.py
-```
+#### Проверка связки MCP → Go
 
-#### Frontend
-```bash
-npm install
-npm run dev
-```
-
-### Project Structure
-```
-├── src/                          # Next.js frontend
-│   ├── app/                      # App Router pages
-│   ├── components/               # React components
-│   └── lib/                      # Utility functions
-├── mcp_server/                   # FastAPI MCP server
-│   ├── app/                      # Application code
-│   │   ├── api/v1/              # API endpoints
-│   │   ├── core/                # Core services
-│   │   └── middleware/          # Custom middleware
-│   └── tests/                   # Test suite
-├── agent_system/                 # Multi-agent system
-│   ├── core/                    # Agent framework
-│   ├── agents/                  # Specialized agents
-│   └── llm/                     # LLM providers
-├── docker-compose.yml           # Multi-service deployment
-└── docs/                        # Documentation
-```
-
-## 📊 API Usage
-
-### MCP Protocol
-The server implements the MCP protocol for tool and resource management:
+**Список tools:**
 
 ```bash
-# Initialize connection
 curl -X POST http://localhost:8000/mcp \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
     "id": 1,
-    "method": "initialize",
-    "params": {
-      "protocolVersion": "2024-11-05",
-      "capabilities": {}
-    }
+    "method": "tools/list",
+    "params": {}
   }'
+```
 
-# List available tools
+**Вызов `financial_analyzer`:**
+
+```bash
 curl -X POST http://localhost:8000/mcp \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
     "id": 2,
-    "method": "tools/list"
-  }'
-
-# Execute a tool
-curl -X POST http://localhost:8000/mcp \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 3,
     "method": "tools/call",
     "params": {
       "name": "financial_analyzer",
       "arguments": {
-        "data": {...}
-      }
+        "base_currency": "USD",
+        "quote_currency": "EUR",
+        "days": 7,
+        "amount": 1000
+      },
+      "agent_id": "manual-test"
     }
   }'
 ```
 
-### REST API
-```bash
-# Create a business task
-curl -X POST http://localhost:8000/api/v1/resources/tasks \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
-  -d '{
-    "title": "Financial Analysis Q4",
-    "description": "Analyze quarterly financial data",
-    "domain": "finance",
-    "priority": "high"
-  }'
-
-# Get system status
-curl -X GET http://localhost:8000/api/v1/admin/system/status
-
-# Health check
-curl -X GET http://localhost:8000/api/v1/health
-```
-
-## 🔍 Monitoring & Observability
-
-### Metrics
-- **Request latency** and throughput
-- **Agent performance** and task completion rates
-- **LLM token usage** and costs
-- **External API** success rates and circuit breaker status
-
-### Tracing
-- **Distributed tracing** with Jaeger
-- **Request correlation** IDs
-- **Agent communication** tracing
-
-### Logging
-- **Structured logging** with correlation IDs
-- **Log levels**: DEBUG, INFO, WARNING, ERROR
-- **JSON format** for easy parsing
-
-## 🔒 Security
-
-### Authentication
-- **JWT tokens** for user authentication
-- **API keys** for service-to-service communication
-- **Rate limiting** per user/API key
-
-### Authorization
-- **Role-based access control** (RBAC)
-- **Resource-level permissions**
-- **CORS** configuration
-
-### Data Protection
-- **Input validation** and sanitization
-- **SQL injection** prevention
-- **XSS protection** headers
-
-## 🚀 Deployment
-
-### Production Deployment
-```bash
-# Set production environment variables
-export NODE_ENV=production
-export DEBUG=false
-
-# Deploy with production configurations
-docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-```
-
-### Cloud.ru Evolution AI Agents
-The system is designed to deploy on Cloud.ru Evolution AI Agents platform:
-
-1. **Container Registry**: Push Docker images to Cloud.ru registry
-2. **AI Agent Configuration**: Configure agent endpoints and API keys
-3. **Load Balancing**: Set up load balancer for high availability
-4. **Monitoring**: Configure Cloud.ru monitoring integration
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🆘 Support
-
-- **Documentation**: Check the `/docs` directory
-- **API Docs**: Visit http://localhost:8000/docs
-- **Issues**: Create an issue on GitHub
-- **Discussions**: Join our GitHub Discussions
-
-## 🗺️ Roadmap
-
-### Phase 1: Core Infrastructure ✅
-- [x] MCP Server implementation
-- [x] Multi-agent system
-- [x] LLM provider integration
-- [x] Basic monitoring
-
-### Phase 2: Advanced Features (In Progress)
-- [ ] Advanced agent orchestration
-- [ ] Custom tool development framework
-- [ ] Advanced analytics and reporting
-- [ ] Multi-tenancy support
-
-### Phase 3: Enterprise Features (Planned)
-- [ ] Advanced security features
-- [ ] Compliance certifications
-- [ ] Advanced monitoring and alerting
-- [ ] Performance optimization
-
-### Phase 4: AI/ML Enhancements (Future)
-- [ ] Custom model training
-- [ ] Advanced prompt engineering
-- [ ] Multi-modal AI capabilities
-- [ ] AutoML integration
+Ожидаем в `result.content[0].json` данные по курсам и метрикам.
 
 ---
 
-Built with ❤️ for enterprise AI transformation
+### 4.2. Agent System + Evolution (локально)
+
+```bash
+cd agent_system
+python -m venv venv
+source venv/bin/activate             # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+
+# В окружении:
+# EVOLUTION_API_KEY=... (ключ из Cloud.ru)
+# MCP_SERVER_URL=http://localhost:8000
+```
+
+Дальше можно написать небольшой скрипт (например, `run_orchestrator_demo.py`), который:
+
+* просит у пользователя текст запроса,
+* создаёт `EvolutionProvider`,
+* вызывает `handle_user_query` и печатает:
+
+  * summary,
+  * рекомендации,
+  * риски,
+  * сырые результаты tools.
+
+(Скелет такого скрипта у нас уже есть — его легко восстановить по коду оркестратора.)
+
+---
+
+## 5. Резюме для коллег
+
+1. **Что уже есть**
+
+   * Рабочий Go-движок `go-biz-engine` с реальным tool `financial_analyzer`.
+   * MCP-сервер `mcp_server`, который:
+
+     * реализует MCP `tools/list` и `tools/call`,
+     * ходит в Go-сервис по HTTP и прокидывает результат клиентам.
+   * Agent System на Evolution:
+
+     * умеет по запросу строить план вызова tools,
+     * выполнять план через MCP,
+     * формировать итоговый A2A-ответ (summary + рекомендации + риски).
+
+2. **Что нужно для Cloud.ru**
+
+   * Есть аккаунт и промокод — ✓.
+   * Надо:
+
+     * получить `EVOLUTION_API_KEY`,
+     * собрать **единый Docker-образ** с MCP-сервером и Go-движком,
+     * залить образ в реестр Cloud.ru,
+     * создать MCP-agent в Evolution и указать:
+
+       * образ,
+       * порт MCP,
+       * переменные окружения (`EVOLUTION_API_KEY`, `GO_BIZ_ENGINE_URL`, и т.п.),
+     * при необходимости — добавить `tools.json` для совместимости с каталогом Evolution AI Agents.
+
+3. **Куда развиваться дальше**
+
+   * Доделать остальные tools (`api_connector`, `data_validator`, `report_generator`).
+   * Прокачать бизнес-сценарий (конкретный кейс: управление валютными рисками, отчётность для финансового директора и т.д.).
+   * Добавить UI (фронт на Next.js) для красивой демонстрации (дашборд, визуализация курсов, алерты).
+
+
+
+
