@@ -1,8 +1,5 @@
 
-
-
-В корне репо `mcp-biz-master` **полностью замени `README.md`** на текст ниже:
-
+---
 ````markdown
 # MCP Business AI Transformation (Cloud.ru Hackathon)
 
@@ -46,24 +43,30 @@
 
 ### 2.2. Клонирование репозитория
 
-```bash
+```
+---
 git clone https://github.com/<ВАШ_АККАУНТ>/<ВАШ_РЕПОЗИТОРИЙ>.git
 cd mcp-biz-master
+---
 ````
 
 ### 2.3. Настройка переменных окружения
 
 Создаём `.env` из примера:
 
-```bash
+```
+---
 cp .env.example .env
+---
 ```
 
 Минимальный набор для запуска MCP-сервера:
 
-```env
+```
+---
 EVOLUTION_API_KEY=ВАШ_КЛЮЧ_ОТ_CLOUD_RU
 SECRET_KEY=любая_длинная_строка_для_подписи
+---
 ```
 
 Все остальные переменные могут остаться как в `.env.example` – они используются вспомогательными сервисами, которые для демо не критичны.
@@ -72,7 +75,8 @@ SECRET_KEY=любая_длинная_строка_для_подписи
 
 ### 2.4. Установка зависимостей и запуск MCP-сервера
 
-```bash
+```
+---
 cd mcp_server
 
 python -m venv .venv
@@ -85,6 +89,7 @@ pip install -r requirements.txt
 
 # запуск MCP-сервера
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+---
 ```
 
 После старта сервер доступен по адресу `http://localhost:8000`.
@@ -97,25 +102,30 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 ### 3.1. Health-чек
 
-```bash
+```
+---
 curl http://localhost:8000/api/v1/health
+---
 ```
 
 Ожидаемый ответ:
 
-```json
+```
+---
 {
   "status": "ok",
   "version": "...",
   "app": "..."
 }
+---
 ```
 
 То же самое будет по `http://localhost:8000/health`.
 
 ### 3.2. MCP `tools/list`
 
-```bash
+```
+---
 curl -X POST http://localhost:8000/mcp \
   -H "Content-Type: application/json" \
   -d '{
@@ -123,11 +133,13 @@ curl -X POST http://localhost:8000/mcp \
     "id": 1,
     "method": "tools/list"
   }'
+---
 ```
 
 Ответ – JSON с перечнем доступных MCP-tools:
 
-```json
+```
+---
 {
   "jsonrpc": "2.0",
   "id": 1,
@@ -141,13 +153,15 @@ curl -X POST http://localhost:8000/mcp \
     ]
   }
 }
+---
 ```
 
 ### 3.3. MCP `tools/call` (пример)
 
 Пример общего вида запроса (конкретные имена и параметры смотрите в `app/api/v1/tools.py`):
 
-```bash
+```
+---
 curl -X POST http://localhost:8000/mcp \
   -H "Content-Type: application/json" \
   -d '{
@@ -161,6 +175,7 @@ curl -X POST http://localhost:8000/mcp \
       }
     }
   }'
+---
 ```
 
 ---
@@ -183,9 +198,11 @@ curl -X POST http://localhost:8000/mcp \
 
 ### 5.1. Сборка Docker-образа
 
-```bash
+```
+---
 cd mcp_server
 docker build -t mcp-biz-server:latest .
+---
 ```
 
 ### 5.2. Публикация образа в Artifact Registry
@@ -194,16 +211,20 @@ docker build -t mcp-biz-server:latest .
 
 2. Выполнить `docker login` по инструкции Cloud.ru:
 
-   ```bash
+```
+---
    docker login <registry_name>.cr.cloud.ru -u <user_or_key> -p <password>
-   ```
+---
+```
 
 3. Протегировать и отправить образ:
 
-   ```bash
+```
+---
    docker tag mcp-biz-server:latest <registry_name>.cr.cloud.ru/mcp-biz-server:latest
    docker push <registry_name>.cr.cloud.ru/mcp-biz-server:latest
-   ```
+---
+```
 
 ### 5.3. Создание Container App
 
@@ -214,14 +235,18 @@ docker build -t mcp-biz-server:latest .
    * переменные окружения: минимум `EVOLUTION_API_KEY` и `SECRET_KEY` (значения – как в локальном `.env`).
 3. Дождаться запуска и запомнить публичный URL контейнера, например:
 
-   ```text
+```
+---
    https://mcp-biz-server.containers.cloud.ru
-   ```
+---
+```
 
 Проверка:
 
-```bash
+```
+---
 curl https://mcp-biz-server.containers.cloud.ru/api/v1/health
+---
 ```
 
 ---
@@ -275,3 +300,5 @@ curl https://mcp-biz-server.containers.cloud.ru/api/v1/health
 * UI-дашборд (папка `src/`) для бизнес-пользователей (визуализация сценариев, алёрты и т.д.).
 
 
+```
+---
