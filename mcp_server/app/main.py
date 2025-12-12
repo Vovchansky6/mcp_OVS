@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Response, HTTPException, Depends
+from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
@@ -9,17 +9,12 @@ import uuid
 from typing import Dict, Any
 
 from app.config import settings
-from app.api.v1 import tools, resources, health, admin
-from app.middleware.auth import AuthMiddleware
-from app.middleware.rate_limiting import RateLimitingMiddleware
-from app.middleware.correlation import CorrelationMiddleware
-from app.middleware.metrics import MetricsMiddleware
 from app.exceptions import MCPException, ValidationException, RateLimitException
-from app.core.database import init_db, close_db, get_db
+from app.core.database import init_db, close_db
 from app.core.redis_client import redis_client
 
+# ------------------------ ЛОГИРОВАНИЕ ------------------------ #
 
-# Configure structured logging
 structlog.configure(
     processors=[
         structlog.stdlib.filter_by_level,
@@ -30,7 +25,7 @@ structlog.configure(
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
-        structlog.processors.JSONRenderer()
+        structlog.processors.JSONRenderer(),
     ],
     context_class=dict,
     logger_factory=structlog.stdlib.LoggerFactory(),
@@ -40,42 +35,57 @@ structlog.configure(
 
 logger = structlog.get_logger()
 
+# ------------------------ LIFESPAN ------------------------ #
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan events"""
     logger.info("Starting MCP Business AI Server", version=settings.app_version)
 
-    # Initialize services
+    # DB и Redis считаем опциональными – если их нет локально, просто логируем и идём дальше
     try:
         await init_db()
-        await redis_client.connect()
-        logger.info("Services initialized successfully")
+        logger.info("Database initialized")
     except Exception as e:
-        logger.error("Failed to initialize services", error=str(e))
-        raise
+        logger.warning("Failed to initialize database, continuing without DB", error=str(e))
+
+    try:
+        await redis_client.connect()
+        logger.info("Redis client connected")
+    except Exception as e:
+        logger.warning("Failed to connect Redis, continuing without Redis", error=str(e))
 
     yield
 
-    await redis_client.disconnect()
-    await close_db()
+    try:
+        await redis_client.disconnect()
+        logger.info("Redis client disconnected")
+    except Exception as e:
+        logger.warning("Failed to disconnect Redis", error=str(e))
+
+    try:
+        await close_db()
+        logger.info("Database connections closed")
+    except Exception as e:
+        logger.warning("Failed to close database", error=str(e))
+
     logger.info("Shutting down MCP Business AI Server")
 
+# ------------------------ APP ------------------------ #
 
-# Create FastAPI application
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="Enterprise-grade MCP server for business AI transformation",
+    description="MCP server for business AI transformation",
     docs_url="/docs" if settings.debug else None,
     redoc_url="/redoc" if settings.debug else None,
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
-# Add middleware
+# CORS / Trusted hosts
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -83,24 +93,62 @@ app.add_middleware(
 
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["*"],  # Configure appropriately for production
+    allowed_hosts=["*"],
 )
 
-app.add_middleware(AuthMiddleware)
-app.add_middleware(RateLimitingMiddleware)
-app.add_middleware(CorrelationMiddleware)
-app.add_middleware(MetricsMiddleware)
+# ------------------------ SAFE MIDDLEWARES ------------------------ #
 
-# Include API routers
-app.include_router(health.router, prefix="/api/v1/health", tags=["health"])
+def _safe_add_middleware(mw_name: str, import_path: str, cls_name: str):
+    """
+    Пытаемся подключить middleware. Если нет зависимостей (jwt, opentelemetry и т.п.) —
+    не валим всё приложение, а просто логируем предупреждение.
+    """
+    try:
+        module = __import__(import_path, fromlist=[cls_name])
+        cls = getattr(module, cls_name)
+        app.add_middleware(cls)
+        logger.info("Middleware enabled", middleware=mw_name)
+    except Exception as e:
+        logger.warning("Middleware disabled", middleware=mw_name, error=str(e))
+
+
+# Эти middlewares зависят от jwt, opentelemetry и прочего. Подключаем по возможности.
+_safe_add_middleware("auth", "app.middleware.auth", "AuthMiddleware")
+_safe_add_middleware("rate_limiting", "app.middleware.rate_limiting", "RateLimitingMiddleware")
+_safe_add_middleware("correlation", "app.middleware.correlation", "CorrelationMiddleware")
+_safe_add_middleware("metrics", "app.middleware.metrics", "MetricsMiddleware")
+
+# ------------------------ ROUTERS ------------------------ #
+
+# Обязательный роутер – tools (инструменты MCP)
+from app.api.v1 import tools
+
 app.include_router(tools.router, prefix="/api/v1/tools", tags=["tools"])
-app.include_router(resources.router, prefix="/api/v1/resources", tags=["resources"])
-app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
+
+
+def _safe_include_router(module_path: str, tag: str, prefix: str):
+    """
+    Подключаем роутер, если модуль есть.
+    Если нет (resource_manager, agent_system и т.п.) — логируем и идём дальше.
+    """
+    try:
+        module = __import__(module_path, fromlist=["router"])
+        router = getattr(module, "router")
+        app.include_router(router, prefix=prefix, tags=[tag])
+        logger.info("Router enabled", module=module_path, prefix=prefix)
+    except Exception as e:
+        logger.warning("Router disabled", module=module_path, error=str(e))
+
+
+# Необязательные роутеры – падают, если нет resource_manager / agent_system.
+_safe_include_router("app.api.v1.resources", "resources", "/api/v1/resources")
+_safe_include_router("app.api.v1.admin", "admin", "/api/v1/admin")
+
+# ------------------------ ЛОГИРОВАНИЕ ЗАПРОСОВ ------------------------ #
 
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    """Log incoming requests"""
     start_time = time.time()
     correlation_id = getattr(request.state, "correlation_id", None) or str(uuid.uuid4())
 
@@ -108,7 +156,7 @@ async def log_requests(request: Request, call_next):
         "Request started",
         method=request.method,
         path=request.url.path,
-        correlation_id=correlation_id
+        correlation_id=correlation_id,
     )
 
     try:
@@ -119,7 +167,7 @@ async def log_requests(request: Request, call_next):
             method=request.method,
             path=request.url.path,
             error=str(e),
-            correlation_id=correlation_id
+            correlation_id=correlation_id,
         )
         raise
 
@@ -130,10 +178,12 @@ async def log_requests(request: Request, call_next):
         path=request.url.path,
         status_code=response.status_code,
         duration_ms=round(process_time * 1000, 2),
-        correlation_id=correlation_id
+        correlation_id=correlation_id,
     )
 
     return response
+
+# ------------------------ HANDLERS EXCEPTIONS ------------------------ #
 
 
 @app.exception_handler(MCPException)
@@ -142,7 +192,7 @@ async def mcp_exception_handler(request: Request, exc: MCPException):
         "MCP exception occurred",
         error_code=exc.error_code,
         message=exc.message,
-        correlation_id=getattr(request.state, "correlation_id", None)
+        correlation_id=getattr(request.state, "correlation_id", None),
     )
     return JSONResponse(
         status_code=exc.status_code,
@@ -150,9 +200,9 @@ async def mcp_exception_handler(request: Request, exc: MCPException):
             "error": {
                 "code": exc.error_code,
                 "message": exc.message,
-                "details": exc.details
+                "details": exc.details,
             }
-        }
+        },
     )
 
 
@@ -162,7 +212,7 @@ async def validation_exception_handler(request: Request, exc: ValidationExceptio
         "Validation error",
         field=exc.field,
         message=exc.message,
-        correlation_id=getattr(request.state, "correlation_id", None)
+        correlation_id=getattr(request.state, "correlation_id", None),
     )
     return JSONResponse(
         status_code=400,
@@ -170,9 +220,9 @@ async def validation_exception_handler(request: Request, exc: ValidationExceptio
             "error": {
                 "code": "VALIDATION_ERROR",
                 "message": exc.message,
-                "field": exc.field
+                "field": exc.field,
             }
-        }
+        },
     )
 
 
@@ -183,7 +233,7 @@ async def rate_limit_exception_handler(request: Request, exc: RateLimitException
         limit=exc.limit,
         window=exc.window,
         retry_after=exc.retry_after,
-        correlation_id=getattr(request.state, "correlation_id", None)
+        correlation_id=getattr(request.state, "correlation_id", None),
     )
     return JSONResponse(
         status_code=429,
@@ -194,13 +244,11 @@ async def rate_limit_exception_handler(request: Request, exc: RateLimitException
                 "details": {
                     "limit": exc.limit,
                     "window": exc.window,
-                    "retry_after": exc.retry_after
-                }
+                    "retry_after": exc.retry_after,
+                },
             }
         },
-        headers={
-            "Retry-After": str(exc.retry_after)
-        }
+        headers={"Retry-After": str(exc.retry_after)},
     )
 
 
@@ -210,46 +258,63 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         "HTTP exception",
         status_code=exc.status_code,
         detail=exc.detail,
-        correlation_id=getattr(request.state, "correlation_id", None)
+        correlation_id=getattr(request.state, "correlation_id", None),
     )
     return JSONResponse(
         status_code=exc.status_code,
         content={
             "error": {
                 "code": "HTTP_ERROR",
-                "message": exc.detail
+                "message": exc.detail,
             }
-        }
+        },
     )
+
+# ------------------------ HEALTH + MCP ------------------------ #
 
 
 @app.get("/health", tags=["health"])
+@app.get("/api/v1/health", tags=["health"])
 async def health_check():
-    """Basic health check endpoint"""
+    """Простой health-эндпоинт без обращения к БД/Redis."""
     return {
         "status": "ok",
         "version": settings.app_version,
-        "app": settings.app_name
+        "app": settings.app_name,
     }
 
 
 @app.post("/mcp")
 async def mcp_endpoint(request: Request):
     """
-    MCP endpoint that handles JSON-RPC messages
+    Единая точка входа MCP (JSON-RPC).
+    Поддерживает методы:
+      - initialize
+      - tools/list
+      - tools/call
+      - resources/list
+      - resources/read
     """
     try:
         message = await request.json()
     except Exception as e:
         logger.error("Failed to parse MCP request", error=str(e))
-        raise MCPException("Invalid JSON-RPC request", error_code="INVALID_REQUEST", status_code=400)
+        raise MCPException(
+            "Invalid JSON-RPC request",
+            error_code="INVALID_REQUEST",
+            status_code=400,
+        )
 
     correlation_id = getattr(request.state, "correlation_id", None) or str(uuid.uuid4())
+    method = message.get("method")
 
     try:
-        method = message.get("method")
         if not method:
-            raise MCPException("Missing method in MCP request", error_code="INVALID_REQUEST", status_code=400)
+            raise MCPException(
+                "Missing method in MCP request",
+                error_code="INVALID_REQUEST",
+                status_code=400,
+            )
 
         if method == "initialize":
             return await handle_initialize(message, correlation_id)
@@ -265,7 +330,7 @@ async def mcp_endpoint(request: Request):
             raise MCPException(
                 error_code="METHOD_NOT_FOUND",
                 message=f"Method '{method}' not found",
-                status_code=404
+                status_code=404,
             )
 
     except MCPException as e:
@@ -273,37 +338,36 @@ async def mcp_endpoint(request: Request):
             "Error processing MCP request",
             method=method,
             error=e.message,
-            correlation_id=correlation_id
+            correlation_id=correlation_id,
         )
         return {
             "jsonrpc": "2.0",
             "id": message.get("id"),
             "error": {
                 "code": -32000,
-                "message": e.message
-            }
+                "message": e.message,
+            },
         }
     except Exception as e:
         logger.error(
             "Error processing MCP request",
             method=method,
             error=str(e),
-            correlation_id=correlation_id
+            correlation_id=correlation_id,
         )
         return {
             "jsonrpc": "2.0",
             "id": message.get("id"),
             "error": {
                 "code": -32603,
-                "message": "Internal error"
-            }
+                "message": "Internal error",
+            },
         }
 
 
 async def handle_initialize(message: Dict[str, Any], correlation_id: str):
-    """Handle MCP initialization"""
+    """Инициализация MCP-клиента."""
     logger.info("MCP initialization", correlation_id=correlation_id)
-
     return {
         "jsonrpc": "2.0",
         "id": message.get("id"),
@@ -311,30 +375,32 @@ async def handle_initialize(message: Dict[str, Any], correlation_id: str):
             "protocolVersion": "2024-11-05",
             "capabilities": {
                 "tools": {},
-                "resources": {}
+                "resources": {},
             },
             "serverInfo": {
                 "name": settings.app_name,
-                "version": settings.app_version
-            }
-        }
+                "version": settings.app_version,
+            },
+        },
     }
 
 
 async def handle_tools_list(message: Dict[str, Any], correlation_id: str):
-    """Handle tools list request (MCP tools/list)."""
+    """Обработка MCP-запроса tools/list."""
+    from app.api.v1 import tools  # локальный импорт, чтобы не ловить циклы
+
     try:
-        # Берём все зарегистрированные инструменты из реестра
-        tools_map = await tools.tool_registry.get_all_tools()  # Dict[str, MCPTool]
+        tools_map = await tools.tool_registry.get_all_tools()
 
         tool_items = []
         for tool_name, tool_obj in tools_map.items():
-            tool_items.append({
-                "name": tool_obj.name,
-                "description": tool_obj.description,
-                # MCP-стиль — camelCase, но внутри можно оставить как есть
-                "inputSchema": tool_obj.input_schema,
-            })
+            tool_items.append(
+                {
+                    "name": tool_obj.name,
+                    "description": tool_obj.description,
+                    "inputSchema": tool_obj.input_schema,
+                }
+            )
 
         logger.info(
             "MCP tools/list handled",
@@ -367,20 +433,20 @@ async def handle_tools_list(message: Dict[str, Any], correlation_id: str):
 
 
 async def handle_tools_call(message: Dict[str, Any], correlation_id: str):
-    """Handle tool execution request (MCP tools/call)."""
-    params = message.get("params") or {}
+    """Обработка MCP-запроса tools/call."""
+    from app.api.v1 import tools
 
+    params = message.get("params") or {}
     tool_name = params.get("name")
     arguments = params.get("arguments") or {}
     agent_id = params.get("agent_id") or "mcp-client"
 
-    # Базовая валидация MCP-параметров
     if not tool_name:
         return {
             "jsonrpc": "2.0",
             "id": message.get("id"),
             "error": {
-                "code": -32602,  # Invalid params
+                "code": -32602,
                 "message": "Invalid params: 'name' is required in tools/call",
             },
         }
@@ -393,7 +459,6 @@ async def handle_tools_call(message: Dict[str, Any], correlation_id: str):
             correlation_id=correlation_id,
         )
 
-        # Запуск business-tool через ToolRegistry (который ходит в Go-сервис)
         execution = await tools.tool_registry.execute_tool(
             tool_name=tool_name,
             parameters=arguments,
@@ -402,13 +467,14 @@ async def handle_tools_call(message: Dict[str, Any], correlation_id: str):
 
         is_error = execution.error is not None
 
-        # MCP обычно ожидает массив content; положим туда JSON-результат.
         content_items = []
         if execution.result is not None:
-            content_items.append({
-                "type": "json",
-                "json": execution.result,
-            })
+            content_items.append(
+                {
+                    "type": "json",
+                    "json": execution.result,
+                }
+            )
 
         result_payload: Dict[str, Any] = {
             "content": content_items,
@@ -436,7 +502,6 @@ async def handle_tools_call(message: Dict[str, Any], correlation_id: str):
         }
 
     except Exception as e:
-        # Системная ошибка (что-то реально упало: баг, сеть, etc.)
         logger.error(
             "MCP tools/call failed",
             tool_name=tool_name,
@@ -458,33 +523,36 @@ async def handle_tools_call(message: Dict[str, Any], correlation_id: str):
 
 
 async def handle_resources_list(message: Dict[str, Any], correlation_id: str):
-    """Handle resources list request"""
+    """Пока заглушка для resources/list."""
+    logger.info("MCP resources/list called", correlation_id=correlation_id)
     return {
         "jsonrpc": "2.0",
         "id": message.get("id"),
         "result": {
-            "resources": []
-        }
+            "resources": [],
+        },
     }
 
 
 async def handle_resources_read(message: Dict[str, Any], correlation_id: str):
-    """Handle resource read request"""
+    """Пока заглушка для resources/read."""
+    logger.info("MCP resources/read called", correlation_id=correlation_id)
     return {
         "jsonrpc": "2.0",
         "id": message.get("id"),
         "result": {
-            "contents": []
-        }
+            "contents": [],
+        },
     }
 
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         "app.main:app",
         host=settings.host,
         port=settings.port,
         reload=settings.debug,
-        workers=1 if settings.debug else settings.workers
+        workers=1 if settings.debug else settings.workers,
     )
